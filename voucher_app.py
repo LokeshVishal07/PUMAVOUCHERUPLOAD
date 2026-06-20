@@ -314,7 +314,8 @@ def process_lazada(ean_df, lazada_bytes):
     active = data[data["status"].astype(str).str.lower() == "active"].copy()
     active["_ean"] = active["SellerSKU"].astype(str).str.strip()
     ok = eligible_ean_set(ean_df)
-    return active[active["_ean"].isin(ok)]["Shop SKU"].dropna().unique().tolist()
+    skus = active[active["_ean"].isin(ok)]["Shop SKU"].dropna().apply(clean_id_str)
+    return skus.dropna().unique().tolist()
 
 
 def _read_shopee_zip(zip_bytes):
@@ -328,6 +329,24 @@ def _read_shopee_zip(zip_bytes):
             bar.progress((i + 1) / len(names), text=f"Reading Shopee file {i+1}/{len(names)}…")
         bar.empty()
     return pd.concat(dfs, ignore_index=True)
+
+
+def clean_id_str(val):
+    """
+    Clean an ID value (Product ID, Shop SKU, etc.) for exact output.
+    Handles the common pandas pitfall where a numeric ID column containing
+    even a single blank cell gets promoted to float64, so whole-number IDs
+    come out as '18890032587.0' instead of '18890032587'.
+    Already-clean strings pass through untouched.
+    """
+    if pd.isna(val):
+        return None
+    if isinstance(val, float):
+        return str(int(val)) if val.is_integer() else str(val)
+    s = str(val).strip()
+    if re.match(r"^-?\d+\.0+$", s):       # defensive: catches '123.0' even if already stringified upstream
+        s = s.split(".")[0]
+    return s
 
 
 def _extract_ean(sku_val, parent_val):
@@ -394,7 +413,7 @@ def build_pid_decisions(combined_df, ean_df):
 def process_shopee(ean_df, zip_bytes):
     combined = _read_shopee_zip(zip_bytes)
     combined["_ean"] = combined.apply(lambda r: _extract_ean(r.get("SKU"), r.get("Parent SKU")), axis=1)
-    combined["_pid"] = combined["Product ID"].astype(str).str.strip()
+    combined["_pid"] = combined["Product ID"].apply(clean_id_str)
     decisions = build_pid_decisions(combined, ean_df)
     ids = [pid for pid, d in decisions.items() if d["decision"] == "Included"]
     return ids, decisions
@@ -416,7 +435,7 @@ def process_zalora(ean_df, eligible_bytes, content_df):
 def process_tiktok(ean_df, tiktok_bytes):
     df = pd.read_excel(io.BytesIO(tiktok_bytes), sheet_name="Template", header=2, skiprows=[3, 4])
     df["_ean"] = df["Seller SKU"].apply(lambda v: _extract_ean(v, None))
-    df["_pid"] = df["Product ID"].astype(str).str.strip()
+    df["_pid"] = df["Product ID"].apply(clean_id_str)
     decisions = build_pid_decisions(df, ean_df)
     ids = [pid for pid, d in decisions.items() if d["decision"] == "Included"]
     return ids, decisions
