@@ -565,9 +565,8 @@ def main():
 
     # ── ③ ZECOM COLUMNS + REMARKS + VOUCHER ──────────────────────
     excl_idx = rrp_idx = srp_idx = zecom_df = None
-    eligible_remarks = set()
-    include_no_remark = False
-    voucher_pct = None
+    voucher_configs = []
+    voucher_type = "Regular VC"
 
     if zecom_file:
         ok_region, err_msg = validate_zecom_region(zecom_file.getvalue(), region)
@@ -611,57 +610,99 @@ def main():
         st.info(f"**Price filter:** RRP > {cfg_cur}  |  SRP = 0 (full price ✓) or SRP ≥ {cfg_cur}  |  "
                 f"SRP > 0 but < {cfg_cur} → excluded")
 
-        # ── ④ VOUCHER CONFIGURATION (pct + remarks side-by-side) ──
+        # ── ④ VOUCHER CONFIGURATION (multiple vouchers, each with its own remarks) ──
         st.markdown("---")
         st.subheader("④ Voucher Configuration")
+        st.caption("Add one row per voucher % you want to generate this run — "
+                  "each row has its own remarks selection.")
 
         unique_remarks = get_unique_remarks(zecom_df, excl_idx)
 
-        vc1, vc2, vc3 = st.columns([1, 1, 2])
-        with vc1:
-            voucher_type = st.radio("Voucher Type", ["Regular VC", "Bundle Discount"])
-        with vc2:
-            pct_raw = st.text_input("Voucher %", value="10", placeholder="10")
-            pct_clean = pct_raw.strip().replace("%", "")
-            voucher_pct = int(pct_clean) if pct_clean.isdigit() else None
-            if pct_raw and voucher_pct is None:
-                st.error("Enter a single whole number, e.g. 10")
-        with vc3:
-            st.markdown("**Eligible Remarks**")
-            if not unique_remarks:
-                st.warning("No remarks found in the selected exclusion column.")
-            else:
-                qc1, qc2, _ = st.columns([1, 1, 2])
-                with qc1: select_all = st.button("✅ Select All")
-                with qc2: clear_all  = st.button("❌ Clear All")
+        voucher_type = st.radio("Voucher Type (applies to all vouchers below)",
+                                ["Regular VC", "Bundle Discount"], horizontal=True)
 
-                if "remark_selection" not in st.session_state:
-                    st.session_state.remark_selection = []
-                if select_all: st.session_state.remark_selection = unique_remarks[:]
-                if clear_all:  st.session_state.remark_selection = []
+        if "voucher_row_ids" not in st.session_state:
+            st.session_state.voucher_row_ids = [0]
+        if "voucher_row_counter" not in st.session_state:
+            st.session_state.voucher_row_counter = 1
 
-                valid_prev = [r for r in st.session_state.remark_selection if r in unique_remarks]
-                selected_remarks_list = st.multiselect(
-                    "remarks", options=unique_remarks, default=valid_prev,
-                    key="remarks_ms", label_visibility="collapsed",
-                    help="Only articles whose remark is selected here will be eligible.",
-                )
-                st.session_state.remark_selection = selected_remarks_list
-                eligible_remarks = set(selected_remarks_list)
+        mp_col_for_preview = cfg["mp_flags"].get(marketplace)
 
-                include_no_remark = st.checkbox(
-                    "Include blank/no-remark articles as eligible", value=False, key="incl_nr")
+        def _render_voucher_row(rid, position):
+            st.markdown(f"**Voucher {position}**")
+            rcol1, rcol2, rcol3 = st.columns([1, 3, 0.6])
 
-        if eligible_remarks or include_no_remark:
-            mp_col = REGION_CONFIG[region]["mp_flags"].get(marketplace)
-            df_prev = zecom_df
-            if mp_col and mp_col in zecom_df.columns:
-                df_prev = zecom_df[zecom_df[mp_col].astype(str).str.strip().str.upper() == "YES"]
-            n_match = df_prev.iloc[:, excl_idx].astype(str).str.strip().isin(eligible_remarks).sum()
-            st.info(f"📊 **{n_match:,}** articles with {marketplace}=YES match the selected remarks "
-                    f"(before price/stock filter).")
-        elif unique_remarks:
-            st.warning("⚠️ No remarks selected and no-remark inclusion is off — nothing will be eligible.")
+            with rcol1:
+                pct_key = f"vc_pct_{rid}"
+                pct_raw = st.text_input("Voucher %", value=st.session_state.get(pct_key, "10"),
+                                        key=pct_key, placeholder="10")
+                pct_clean = pct_raw.strip().replace("%", "")
+                pct_val = int(pct_clean) if pct_clean.isdigit() else None
+                if pct_raw and pct_val is None:
+                    st.error("Whole number only, e.g. 10")
+
+            with rcol2:
+                st.markdown("**Eligible Remarks**")
+                selected = []
+                include_nr = False
+                if not unique_remarks:
+                    st.warning("No remarks found in the selected exclusion column.")
+                else:
+                    qc1, qc2, _ = st.columns([1, 1, 3])
+                    with qc1:
+                        if st.button("✅ Select All", key=f"vc_sa_{rid}"):
+                            st.session_state[f"vc_remarks_{rid}"] = unique_remarks[:]
+                    with qc2:
+                        if st.button("❌ Clear All", key=f"vc_ca_{rid}"):
+                            st.session_state[f"vc_remarks_{rid}"] = []
+
+                    selected = st.multiselect(
+                        "remarks", options=unique_remarks, default=[],
+                        key=f"vc_remarks_{rid}", label_visibility="collapsed",
+                        help="Only articles whose remark is selected here will be eligible for this voucher.",
+                    )
+                    include_nr = st.checkbox("Include blank/no-remark articles as eligible",
+                                             value=False, key=f"vc_nr_{rid}")
+
+                    eligible_set = set(selected)
+                    if eligible_set or include_nr:
+                        df_prev = zecom_df
+                        if mp_col_for_preview and mp_col_for_preview in zecom_df.columns:
+                            df_prev = zecom_df[zecom_df[mp_col_for_preview].astype(str)
+                                               .str.strip().str.upper() == "YES"]
+                        n_match = df_prev.iloc[:, excl_idx].astype(str).str.strip().isin(eligible_set).sum()
+                        st.caption(f"📊 {n_match:,} articles with {marketplace}=YES match "
+                                  f"(before price/stock filter).")
+                    else:
+                        st.caption("⚠️ No remarks selected and no-remark inclusion is off.")
+
+            with rcol3:
+                st.markdown("&nbsp;")
+                remove_clicked = False
+                if len(st.session_state.voucher_row_ids) > 1:
+                    remove_clicked = st.button("🗑️", key=f"vc_rm_{rid}", help="Remove this voucher")
+
+            return {"rid": rid, "pct": pct_val, "remarks": set(selected),
+                   "include_no_remark": include_nr, "remove": remove_clicked}
+
+        voucher_configs = []
+        to_remove = None
+        for pos, rid in enumerate(list(st.session_state.voucher_row_ids), start=1):
+            row = _render_voucher_row(rid, pos)
+            voucher_configs.append(row)
+            if row["remove"]:
+                to_remove = rid
+            st.markdown("&nbsp;")
+
+        if to_remove is not None:
+            st.session_state.voucher_row_ids.remove(to_remove)
+            st.rerun()
+
+        if st.button("➕ Add Another Voucher"):
+            new_id = st.session_state.voucher_row_counter
+            st.session_state.voucher_row_ids.append(new_id)
+            st.session_state.voucher_row_counter += 1
+            st.rerun()
 
     # ── ⑤ GENERATE ────────────────────────────────────────────────
     st.markdown("---")
@@ -672,18 +713,23 @@ def main():
     if not content_file:  missing.append("Content File")
     if not inv_file:      missing.append("Inventory File")
     if not mp_file:       missing.append(f"{marketplace} Export")
-    if voucher_pct is None: missing.append("Voucher % (single value)")
-    if zecom_file and not eligible_remarks and not include_no_remark:
-        missing.append("At least one eligible remark, or enable no-remark inclusion")
+
+    if zecom_file:
+        if not voucher_configs:
+            missing.append("At least one voucher row")
+        for i, row in enumerate(voucher_configs, start=1):
+            if row["pct"] is None:
+                missing.append(f"Voucher {i}: valid %")
+            if not row["remarks"] and not row["include_no_remark"]:
+                missing.append(f"Voucher {i}: at least one remark, or enable no-remark inclusion")
 
     if missing:
         st.info(f"Still needed: **{', '.join(missing)}**")
 
-    if st.button("🚀 Generate Eligible SKU List", disabled=bool(missing), type="primary"):
+    if st.button("🚀 Generate Eligible SKU Lists", disabled=bool(missing), type="primary"):
         _run(zecom_file, content_file, inv_file, mp_file,
              region, marketplace, excl_idx, rrp_idx, srp_idx,
-             eligible_remarks, include_no_remark, special_articles,
-             voucher_pct, voucher_type)
+             special_articles, voucher_type, voucher_configs)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -692,8 +738,7 @@ def main():
 
 def _run(zecom_file, content_file, inv_file, mp_file,
          region, marketplace, excl_idx, rrp_idx, srp_idx,
-         eligible_remarks, include_no_remark, special_articles,
-         voucher_pct, voucher_type):
+         special_articles, voucher_type, voucher_configs):
 
     with st.status("Processing…", expanded=True) as status:
 
@@ -724,54 +769,64 @@ def _run(zecom_file, content_file, inv_file, mp_file,
         except Exception as e:
             st.error(f"Inventory read error: {e}"); status.update(label="❌ Error", state="error"); return
 
-        st.write(f"⚙️  Processing **{voucher_pct}% {voucher_type}** — "
-                 f"{len(eligible_remarks)} remark(s) selected, "
-                 f"{len(special_articles)} special exclusion(s)…")
+        all_outputs = []   # one entry per voucher row
 
-        art = process_zecom(zecom_df, region, marketplace, excl_idx, rrp_idx, srp_idx,
-                            eligible_remarks, include_no_remark, special_articles)
-        n_elig  = (art["status"] == "eligible").sum()
-        n_nr    = (art["status"] == "no_remark").sum()
-        n_ineli = (art["status"] == "ineligible").sum()
-        st.write(f"   ZeCom: {n_elig} eligible | {n_nr} no-remark | {n_ineli} ineligible")
+        for vi, row in enumerate(voucher_configs, start=1):
+            pct = row["pct"]
+            eligible_remarks  = row["remarks"]
+            include_no_remark = row["include_no_remark"]
 
-        ean_df = map_to_eans(art, content_df, inv_df)
-        n_ok   = len(eligible_ean_set(ean_df))
-        st.write(f"   EANs in stock & eligible: {n_ok:,}")
+            st.write(f"⚙️  Voucher {vi}: **{pct}% {voucher_type}** — "
+                     f"{len(eligible_remarks)} remark(s), "
+                     f"{len(special_articles)} special exclusion(s)…")
 
-        result = None
-        pid_decisions = None
+            art = process_zecom(zecom_df, region, marketplace, excl_idx, rrp_idx, srp_idx,
+                                eligible_remarks, include_no_remark, special_articles)
+            n_elig  = (art["status"] == "eligible").sum()
+            n_nr    = (art["status"] == "no_remark").sum()
+            n_ineli = (art["status"] == "ineligible").sum()
+            st.write(f"   ZeCom: {n_elig} eligible | {n_nr} no-remark | {n_ineli} ineligible")
 
-        if n_ok > 0:
-            try:
-                if marketplace == "Lazada":
-                    ids = process_lazada(ean_df, mp_file.getvalue())
-                    st.write(f"   ✅ Lazada Shop SKUs → **{len(ids)}**")
-                    result = {"mp": "Lazada", "ids": ids}
-                elif marketplace == "Shopee":
-                    ids, pid_decisions = process_shopee(ean_df, mp_file.getvalue())
-                    st.write(f"   ✅ Shopee Product IDs → **{len(ids)}** included "
-                             f"(of {len(pid_decisions)} total PIDs)")
-                    result = {"mp": "Shopee", "ids": ids}
-                elif marketplace == "Zalora":
-                    ann = process_zalora(ean_df, mp_file.getvalue(), content_df)
-                    y  = (ann["Voucher Eligible"] == "Yes").sum()
-                    nr = (ann["Voucher Eligible"] == "No Remark").sum()
-                    st.write(f"   ✅ Zalora: {y} eligible | {nr} no-remark")
-                    result = {"mp": "Zalora", "ann": ann, "yes_count": y}
-                elif marketplace == "TikTok":
-                    ids, pid_decisions = process_tiktok(ean_df, mp_file.getvalue())
-                    st.write(f"   ✅ TikTok Product IDs → **{len(ids)}** included "
-                             f"(of {len(pid_decisions)} total PIDs)")
-                    result = {"mp": "TikTok", "ids": ids}
-            except Exception as e:
-                st.error(f"   Error processing {marketplace}: {e}")
-        else:
-            st.warning("   No in-stock eligible EANs — marketplace output will be empty. "
-                       "QC summary will still be generated.")
+            ean_df = map_to_eans(art, content_df, inv_df)
+            n_ok   = len(eligible_ean_set(ean_df))
+            st.write(f"   EANs in stock & eligible: {n_ok:,}")
 
-        summary_bytes = make_summary_excel(ean_df, region, marketplace, voucher_pct,
-                                           voucher_type, pid_decisions)
+            result = None
+            pid_decisions = None
+
+            if n_ok > 0:
+                try:
+                    if marketplace == "Lazada":
+                        ids = process_lazada(ean_df, mp_file.getvalue())
+                        st.write(f"   ✅ Lazada Shop SKUs → **{len(ids)}**")
+                        result = {"mp": "Lazada", "ids": ids}
+                    elif marketplace == "Shopee":
+                        ids, pid_decisions = process_shopee(ean_df, mp_file.getvalue())
+                        st.write(f"   ✅ Shopee Product IDs → **{len(ids)}** included "
+                                 f"(of {len(pid_decisions)} total PIDs)")
+                        result = {"mp": "Shopee", "ids": ids}
+                    elif marketplace == "Zalora":
+                        ann = process_zalora(ean_df, mp_file.getvalue(), content_df)
+                        y  = (ann["Voucher Eligible"] == "Yes").sum()
+                        nr = (ann["Voucher Eligible"] == "No Remark").sum()
+                        st.write(f"   ✅ Zalora: {y} eligible | {nr} no-remark")
+                        result = {"mp": "Zalora", "ann": ann, "yes_count": y}
+                    elif marketplace == "TikTok":
+                        ids, pid_decisions = process_tiktok(ean_df, mp_file.getvalue())
+                        st.write(f"   ✅ TikTok Product IDs → **{len(ids)}** included "
+                                 f"(of {len(pid_decisions)} total PIDs)")
+                        result = {"mp": "TikTok", "ids": ids}
+                except Exception as e:
+                    st.error(f"   Error processing {marketplace}: {e}")
+            else:
+                st.warning("   No in-stock eligible EANs — marketplace output will be empty. "
+                           "QC summary will still be generated.")
+
+            summary_bytes = make_summary_excel(ean_df, region, marketplace, pct,
+                                               voucher_type, pid_decisions)
+
+            all_outputs.append({"pct": pct, "result": result,
+                                "summary_bytes": summary_bytes, "pid_decisions": pid_decisions})
 
         status.update(label="✅ Done!", state="complete")
 
@@ -781,35 +836,44 @@ def _run(zecom_file, content_file, inv_file, mp_file,
     today    = pd.Timestamp.now().strftime("%Y%m%d")
     vt_short = "Bundle" if voucher_type == "Bundle Discount" else "VC"
 
-    d1, d2 = st.columns(2)
+    for out in all_outputs:
+        pct           = out["pct"]
+        result        = out["result"]
+        summary_bytes = out["summary_bytes"]
+        pid_decisions = out["pid_decisions"]
 
-    with d1:
-        st.markdown("**Marketplace Output**")
-        if result:
-            mp = result["mp"]
-            fname = f"{mp}_{region}_{voucher_pct}pct_{vt_short}_{today}.xlsx"
-            if mp == "Zalora":
-                st.metric(f"{mp} — {voucher_pct}% {vt_short}", f"{result['yes_count']} eligible SKUs")
-                data = make_zalora_output(result["ann"])
+        st.markdown(f"#### Voucher: {pct}% {voucher_type}")
+        d1, d2 = st.columns(2)
+
+        with d1:
+            st.markdown("**Marketplace Output**")
+            if result:
+                mp = result["mp"]
+                fname = f"{mp}_{region}_{pct}pct_{vt_short}_{today}.xlsx"
+                if mp == "Zalora":
+                    st.metric(f"{mp} — {pct}% {vt_short}", f"{result['yes_count']} eligible SKUs")
+                    data = make_zalora_output(result["ann"])
+                else:
+                    label = "Shop SKUs" if mp == "Lazada" else "Product IDs"
+                    st.metric(f"{mp} — {pct}% {vt_short}", f"{len(result['ids'])} {label}")
+                    data = make_lazada_output(result["ids"]) if mp == "Lazada" else make_shopee_output(result["ids"])
+                st.download_button(f"⬇️ Download {fname}", data=data, file_name=fname,
+                                  mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                  key=f"dl_main_{pct}")
             else:
-                label = "Shop SKUs" if mp == "Lazada" else "Product IDs"
-                st.metric(f"{mp} — {voucher_pct}% {vt_short}", f"{len(result['ids'])} {label}")
-                data = make_lazada_output(result["ids"]) if mp == "Lazada" else make_shopee_output(result["ids"])
-            st.download_button(f"⬇️ Download {fname}", data=data, file_name=fname,
-                              mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                              key="dl_main")
-        else:
-            st.info("No marketplace output generated (0 eligible EANs).")
+                st.info("No marketplace output generated (0 eligible EANs).")
 
-    with d2:
-        st.markdown("**QC Summary (audit trail)**")
-        summary_fname = f"QC_Summary_{marketplace}_{region}_{voucher_pct}pct_{vt_short}_{today}.xlsx"
-        st.caption("Includes per-article/EAN status + reasons" +
-                  (" + Product ID summary." if pid_decisions else "."))
-        st.download_button(f"⬇️ Download {summary_fname}", data=summary_bytes,
-                          file_name=summary_fname,
-                          mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                          key="dl_summary")
+        with d2:
+            st.markdown("**QC Summary (audit trail)**")
+            summary_fname = f"QC_Summary_{marketplace}_{region}_{pct}pct_{vt_short}_{today}.xlsx"
+            st.caption("Includes per-article/EAN status + reasons" +
+                      (" + Product ID summary." if pid_decisions else "."))
+            st.download_button(f"⬇️ Download {summary_fname}", data=summary_bytes,
+                              file_name=summary_fname,
+                              mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                              key=f"dl_summary_{pct}")
+
+        st.markdown("---")
 
 
 if __name__ == "__main__":
