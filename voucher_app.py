@@ -731,6 +731,10 @@ def main():
              region, marketplace, excl_idx, rrp_idx, srp_idx,
              special_articles, voucher_type, voucher_configs)
 
+    # Always render last results (if any) — independent of the button click above,
+    # so downloads/other widget interactions don't wipe them out.
+    render_results()
+
 
 # ─────────────────────────────────────────────────────────────────
 # PROCESSING PIPELINE
@@ -830,11 +834,43 @@ def _run(zecom_file, content_file, inv_file, mp_file,
 
         status.update(label="✅ Done!", state="complete")
 
-    # ── ⑥ DOWNLOAD ───────────────────────────────────────────────
+    # Persist results in session_state so they survive reruns
+    # (e.g. clicking a download button triggers a rerun — without this,
+    # the results would vanish since _run() wouldn't execute again).
+    st.session_state["last_run"] = {
+        "all_outputs":  all_outputs,
+        "region":       region,
+        "marketplace":  marketplace,
+        "voucher_type": voucher_type,
+        "generated_at": pd.Timestamp.now().strftime("%Y%m%d_%H%M%S"),
+    }
+
+
+def render_results():
+    """Render the download section from session_state — survives reruns triggered by
+    clicking a download button, switching tabs, etc. Only cleared on next Generate
+    click or explicit 'Clear Results'."""
+    last = st.session_state.get("last_run")
+    if not last:
+        return
+
+    all_outputs  = last["all_outputs"]
+    region       = last["region"]
+    marketplace  = last["marketplace"]
+    voucher_type = last["voucher_type"]
+    today        = pd.Timestamp.now().strftime("%Y%m%d")
+    vt_short     = "Bundle" if voucher_type == "Bundle Discount" else "VC"
+
     st.markdown("---")
-    st.subheader("⑥ Download Results")
-    today    = pd.Timestamp.now().strftime("%Y%m%d")
-    vt_short = "Bundle" if voucher_type == "Bundle Discount" else "VC"
+    hcol1, hcol2 = st.columns([5, 1])
+    with hcol1:
+        st.subheader("⑥ Download Results")
+        st.caption(f"From last Generate run ({marketplace} / {region}) — "
+                  "stays available until you click Generate again.")
+    with hcol2:
+        if st.button("🧹 Clear"):
+            del st.session_state["last_run"]
+            st.rerun()
 
     for out in all_outputs:
         pct           = out["pct"]
