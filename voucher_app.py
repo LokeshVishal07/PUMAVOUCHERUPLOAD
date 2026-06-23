@@ -29,7 +29,7 @@ REGION_CONFIG = {
     },
     "MY": {
         "zecom_sheet": "MY", "zecom_read": "header3", "article_col": "Style#",
-        "threshold": 36, "currency": "RM 36",
+        "threshold": 39, "currency": "RM 39",
         "mp_flags": {"Lazada": "Lazada", "Shopee": "Shopee",
                      "Zalora": "Zalora MP", "TikTok": "TIKTOK"},
         "default_excl": 51, "default_rrp": 27, "default_srp": 49,
@@ -249,10 +249,12 @@ def process_zecom(zecom_df, region, marketplace, excl_idx, rrp_idx, srp_idx,
         mp_status_disp = pd.Series(["N/A"] * len(df), index=df.index)
         status_ok = pd.Series([True] * len(df), index=df.index)
 
-    threshold = cfg["threshold"]
+    threshold = cfg.get("threshold_overrides", {}).get(marketplace, cfg["threshold"])
     rrp = pd.to_numeric(df.iloc[:, rrp_idx], errors="coerce")
     srp = pd.to_numeric(df.iloc[:, srp_idx], errors="coerce")
-    srp_ok   = (srp == 0) | (srp >= threshold)
+    # SRP blank/NaN or 0 both mean "no special price entered" -> full price (RRP) -> OK.
+    # Only a SRP that's actually entered (>0) but below the threshold should fail.
+    srp_ok   = srp.isna() | (srp == 0) | (srp >= threshold)
     price_ok = (rrp > threshold) & srp_ok
 
     remark_vals  = df.iloc[:, excl_idx]
@@ -432,10 +434,66 @@ def process_zalora(ean_df, eligible_bytes, content_df):
     return df
 
 
+def _find_col(df, *keyword_sets):
+    """Return the first column whose lowercased name contains all keywords in any given tuple."""
+    for kws in keyword_sets:
+        for c in df.columns:
+            cl = str(c).strip().lower()
+            if all(kw in cl for kw in kws):
+                return c
+    return None
+
+
+def _autodetect_tiktok_header(raw_bytes):
+    """Scan the first ~15 rows of the relevant sheet for a row that looks like the real
+    header (contains both a SKU-ish cell and a Product-ID-ish cell)."""
+    xls = pd.ExcelFile(io.BytesIO(raw_bytes))
+    sheet = "Template" if "Template" in xls.sheet_names else xls.sheet_names[0]
+    raw = pd.read_excel(xls, sheet_name=sheet, header=None, nrows=15)
+    for i in range(len(raw)):
+        row_vals = raw.iloc[i].astype(str).str.lower().tolist()
+        has_sku = any("sku" in v for v in row_vals)
+        has_pid = any(("product" in v and "id" in v) for v in row_vals)
+        if has_sku and has_pid:
+            return sheet, i
+    return sheet, None
+
+
 def process_tiktok(ean_df, tiktok_bytes):
-    df = pd.read_excel(io.BytesIO(tiktok_bytes), sheet_name="Template", header=2, skiprows=[3, 4])
-    df["_ean"] = df["Seller SKU"].apply(lambda v: _extract_ean(v, None))
-    df["_pid"] = df["Product ID"].apply(clean_id_str)
+    # 1) Try the known/expected TikTok template layout first.
+    df = None
+    try:
+        df = pd.read_excel(io.BytesIO(tiktok_bytes), sheet_name="Template", header=2, skiprows=[3, 4])
+    except Exception:
+        pass
+
+    sku_col = pid_col = None
+    if df is not None:
+        sku_col = _find_col(df, ("seller", "sku"), ("sku",))
+        pid_col = _find_col(df, ("product", "id"))
+
+    # 2) If that didn't work, auto-detect the real header row from the raw file.
+    if sku_col is None or pid_col is None:
+        sheet, header_row = _autodetect_tiktok_header(tiktok_bytes)
+        if header_row is not None:
+            df2 = pd.read_excel(io.BytesIO(tiktok_bytes), sheet_name=sheet, header=header_row)
+            sku_col2 = _find_col(df2, ("seller", "sku"), ("sku",))
+            pid_col2 = _find_col(df2, ("product", "id"))
+            if sku_col2 and pid_col2:
+                df, sku_col, pid_col = df2, sku_col2, pid_col2
+
+    # 3) Still nothing — fail with a clear, actionable message instead of a bare KeyError.
+    if sku_col is None or pid_col is None:
+        available = list(df.columns) if df is not None else ["(could not read file)"]
+        raise ValueError(
+            "Could not find a 'Seller SKU' and 'Product ID' column in the TikTok export. "
+            f"Columns actually found: {available}. "
+            "Please check the file's sheet name / header row, or share the file so the "
+            "column mapping can be fixed."
+        )
+
+    df["_ean"] = df[sku_col].apply(lambda v: _extract_ean(v, None))
+    df["_pid"] = df[pid_col].apply(clean_id_str)
     decisions = build_pid_decisions(df, ean_df)
     ids = [pid for pid, d in decisions.items() if d["decision"] == "Included"]
     return ids, decisions
@@ -625,9 +683,13 @@ def main():
             srp_idx = opts.index(srp_sel)
             st.caption(f"Sample: `{sample_vals(zecom_df, srp_idx)}`")
 
-        cfg_cur = cfg["currency"]
-        st.info(f"**Price filter:** RRP > {cfg_cur}  |  SRP = 0 (full price ✓) or SRP ≥ {cfg_cur}  |  "
-                f"SRP > 0 but < {cfg_cur} → excluded")
+        thr = cfg.get("threshold_overrides", {}).get(marketplace, cfg["threshold"])
+        ccy_symbol = cfg["currency"].split()[0]   # e.g. "RM", "PHP", "SGD"
+        thr_label  = f"{ccy_symbol} {thr}"
+        override_note = " (TikTok-specific)" if marketplace in cfg.get("threshold_overrides", {}) else ""
+        st.info(f"**Price filter for {marketplace}:** RRP > {thr_label}{override_note}  |  "
+                f"SRP blank or = 0 (full price ✓) or SRP ≥ {thr_label}  |  "
+                f"SRP > 0 but < {thr_label} → excluded")
 
         # ── ④ VOUCHER CONFIGURATION (multiple vouchers, each with its own remarks) ──
         st.markdown("---")
