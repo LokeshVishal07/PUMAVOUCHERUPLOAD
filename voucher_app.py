@@ -559,7 +559,8 @@ def make_shopee_output(ids): return _to_excel_multi({"Sheet1": pd.DataFrame({"Pr
 def make_zalora_output(ann): return _to_excel_multi({"Eligible Products": ann})
 
 
-def make_summary_excel(ean_df, region, marketplace, pct, voucher_type, pid_decisions=None):
+def make_summary_excel(ean_df, region, marketplace, pct, voucher_type, pid_decisions=None,
+                       column_labels=None):
     detail = ean_df.copy()
     detail["status"] = detail["status"].map(
         {"eligible": "Eligible", "ineligible": "Ineligible", "no_remark": "No Remark"})
@@ -593,6 +594,17 @@ def make_summary_excel(ean_df, region, marketplace, pct, voucher_type, pid_decis
     stats_rows = [
         ("Region", region), ("Marketplace", marketplace),
         ("Voucher %", pct), ("Voucher Type", voucher_type),
+    ]
+
+    if column_labels:
+        stats_rows += [
+            ("ZeCom Exclusion / Campaign Column", column_labels.get("excl", "")),
+            ("ZeCom RRP Column", column_labels.get("rrp", "")),
+            ("ZeCom SRP Column", column_labels.get("srp", "")),
+            ("ZeCom Launch Date Column", column_labels.get("launch", "")),
+        ]
+
+    stats_rows += [
         ("Total Article-EAN rows", total),
         ("Eligible", int(n_elig)), ("Ineligible", int(n_inelig)), ("No Remark", int(n_norem)),
         ("Excluded — Special Article", int(n_special)),
@@ -896,6 +908,12 @@ def _run(zecom_file, content_file, inv_file, mp_file,
             zecom_df = read_zecom(zecom_file.getvalue(), region)
             st.write(f"   ✓ {len(zecom_df):,} rows | excl=[{excl_idx}] rrp=[{rrp_idx}] "
                      f"srp=[{srp_idx}] launch=[{launch_idx}]")
+            column_labels = {
+                "excl":   f"{excel_col_letter(excl_idx)}: {zecom_df.columns[excl_idx]}",
+                "rrp":    f"{excel_col_letter(rrp_idx)}: {zecom_df.columns[rrp_idx]}",
+                "srp":    f"{excel_col_letter(srp_idx)}: {zecom_df.columns[srp_idx]}",
+                "launch": f"{excel_col_letter(launch_idx)}: {zecom_df.columns[launch_idx]}",
+            }
         except Exception as e:
             st.error(f"ZeCom read error: {e}"); status.update(label="❌ Error", state="error"); return
 
@@ -973,7 +991,7 @@ def _run(zecom_file, content_file, inv_file, mp_file,
                            "QC summary will still be generated.")
 
             summary_bytes = make_summary_excel(ean_df, region, marketplace, pct,
-                                               voucher_type, pid_decisions)
+                                               voucher_type, pid_decisions, column_labels)
 
             all_outputs.append({"pct": pct, "result": result,
                                 "summary_bytes": summary_bytes, "pid_decisions": pid_decisions})
